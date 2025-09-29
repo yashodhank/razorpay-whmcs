@@ -154,13 +154,36 @@ function razorpay_config()
             ),
             'Description' => 'How to handle Razorpay processing fees:<br/><strong>Merchant Absorbs:</strong> Client pays invoice amount, you absorb the fee<br/><strong>Client Pays:</strong> Client pays invoice + fee, you receive full amount',
         ),
+        'feeCreditBehavior' => array(
+            'FriendlyName' => 'Fee Credit Behavior',
+            'Type' => 'dropdown',
+            'Default' => 'disabled',
+            'Options' => array(
+                'disabled' => 'Disabled - No automatic credit (Recommended)',
+                'enabled' => 'Enabled - Add fee as credit balance',
+            ),
+            'Description' => 'Controls whether gateway fees are automatically added as credit balance:<br/><strong>Disabled:</strong> Fees are recorded but not added as credit (Recommended)<br/><strong>Enabled:</strong> Fees are added as credit balance to client account',
+        ),
         'last_synced_at' => array(
             'FriendlyName' => 'Last Sync Timestamp',
             'Type' => 'text',
             'Size' => '50',
             'Default' => '',
-            'Description' => 'Internal field for tracking last sync checkpoint. Do not modify manually.',
-        )
+            'Description' => 'Last successful sync with Razorpay (Auto-updated)',
+        ),
+        'autoSyncEnabled' => array(
+            'FriendlyName' => 'Auto Sync',
+            'Type' => 'yesno',
+            'Default' => 'yes',
+            'Description' => 'Enable automatic synchronization with Razorpay webhooks',
+        ),
+        'syncInterval' => array(
+            'FriendlyName' => 'Sync Interval (minutes)',
+            'Type' => 'text',
+            'Size' => '10',
+            'Default' => '60',
+            'Description' => 'How often to sync with Razorpay (in minutes). Minimum: 15',
+        ),
     );
 }
 
@@ -453,6 +476,77 @@ function razorpay_refund($params)
 }
 
 /**
+ * Capture authorized payment.
+ * @param array $params Gateway parameters
+ * @return array
+ */
+function razorpay_capture($params)
+{
+    try {
+        $api = getRazorpayApiInstance($params);
+        
+        // Validate required parameters
+        if (empty($params['transid'])) {
+            return array(
+                'status' => 'error',
+                'rawdata' => 'Transaction ID is required for capture',
+                'declinereason' => 'Missing transaction ID'
+            );
+        }
+        
+        if (empty($params['amount']) || $params['amount'] <= 0) {
+            return array(
+                'status' => 'error',
+                'rawdata' => 'Valid capture amount is required',
+                'declinereason' => 'Invalid capture amount'
+            );
+        }
+        
+        // Prepare capture data
+        $captureData = array(
+            'amount' => (int) round($params['amount'] * 100), // Convert to paisa
+            'currency' => $params['currency'] ?? 'INR'
+        );
+        
+        // Capture payment
+        $capture = $api->payment->capture($params['transid'], $captureData);
+        
+        if ($capture && isset($capture['id'])) {
+            logTransaction(razorpay_MetaData()['DisplayName'], array(
+                'capture_id' => $capture['id'],
+                'payment_id' => $params['transid'],
+                'amount' => $params['amount'],
+                'status' => $capture['status']
+            ), 'Capture Successful');
+            
+            return array(
+                'status' => 'success',
+                'rawdata' => $capture,
+                'transid' => $capture['id'],
+                'fees' => 0
+            );
+        } else {
+            return array(
+                'status' => 'error',
+                'rawdata' => 'Capture failed',
+                'declinereason' => 'Capture request failed'
+            );
+        }
+    } catch (Exception $e) {
+        logTransaction(razorpay_MetaData()['DisplayName'], array(
+            'error' => $e->getMessage(),
+            'payment_id' => $params['transid'] ?? 'unknown'
+        ), 'Capture Error');
+        
+        return array(
+            'status' => 'error',
+            'rawdata' => 'Capture failed: ' . $e->getMessage(),
+            'declinereason' => $e->getMessage()
+        );
+    }
+}
+
+/**
  * Callback handler for payment completion - CRITICAL FIX
  * @param array $params Callback parameters
  * @return void
@@ -482,4 +576,59 @@ function getRazorpayApiInstanceForCallback($params)
     $secret = $params['keySecret'];
 
     return new Api($key, $secret);
+}
+
+/**
+ * Update last sync timestamp
+ * @param string $gatewayName Gateway name
+ * @param string $timestamp Sync timestamp
+ */
+function updateLastSyncTimestamp($gatewayName, $timestamp = null)
+{
+    if ($timestamp === null) {
+        $timestamp = date('Y-m-d H:i:s');
+    }
+    
+    try {
+        // Update the gateway configuration
+        $result = localAPI('UpdateGatewayConfiguration', array(
+            'gateway' => $gatewayName,
+            'setting' => 'last_synced_at',
+            'value' => $timestamp
+        ));
+        
+        if ($result['result'] === 'success') {
+            logActivity('Razorpay Sync Timestamp Updated: ' . $timestamp);
+        } else {
+            logActivity('Razorpay Sync Timestamp Update Failed: ' . ($result['message'] ?? 'Unknown error'));
+        }
+    } catch (Exception $e) {
+        logActivity('Razorpay Sync Timestamp Update Error: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Check if sync is needed based on interval
+ * @param array $gatewayParams Gateway parameters
+ * @return bool
+ */
+function isSyncNeeded($gatewayParams)
+{
+    $autoSyncEnabled = $gatewayParams['autoSyncEnabled'] ?? 'yes';
+    if ($autoSyncEnabled !== 'yes') {
+        return false;
+    }
+    
+    $lastSync = $gatewayParams['last_synced_at'] ?? '';
+    if (empty($lastSync)) {
+        return true; // Never synced
+    }
+    
+    $syncInterval = intval($gatewayParams['syncInterval'] ?? 60);
+    $syncInterval = max(15, $syncInterval); // Minimum 15 minutes
+    
+    $lastSyncTime = strtotime($lastSync);
+    $currentTime = time();
+    
+    return ($currentTime - $lastSyncTime) >= ($syncInterval * 60);
 }

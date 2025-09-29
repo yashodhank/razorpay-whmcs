@@ -1,5 +1,8 @@
 <?php
 
+// Include the main gateway file for sync functions
+require_once __DIR__ . '/../razorpay.php';
+
 /**
  * WHMCS Razorpay Compatibility Layer
  * PHP 5.6+ safe with WHMCS 6/7/8 support
@@ -525,6 +528,11 @@ function validateWebhookData($data)
     }
     
     return true;
+}
+
+// Update sync timestamp after successful webhook processing
+if (function_exists('updateLastSyncTimestamp')) {
+    updateLastSyncTimestamp('razorpay');
 }
 
 ?>

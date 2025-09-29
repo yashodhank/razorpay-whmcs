@@ -11,13 +11,27 @@
  * @license MIT
  */
 
-// Prevent direct access
-if (!defined('WHMCS')) {
-    die('This file cannot be accessed directly');
+// Security: Only allow POST requests
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    http_response_code(405);
+    die('Method Not Allowed');
 }
 
 // Include the main gateway file
 require_once __DIR__ . '/../razorpay.php';
+
+// Security: Rate limiting check
+$clientIp = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+$rateLimitKey = 'razorpay_callback_' . md5($clientIp);
+if (function_exists('apcu_fetch')) {
+    $rateLimitCount = apcu_fetch($rateLimitKey) ?: 0;
+    if ($rateLimitCount > 10) { // Max 10 requests per minute
+        logActivity('Razorpay Callback Security: Rate limit exceeded for IP - ' . $clientIp);
+        http_response_code(429);
+        die('Too Many Requests');
+    }
+    apcu_store($rateLimitKey, $rateLimitCount + 1, 60); // 1 minute TTL
+}
 
 /**
  * WHMCS Razorpay Compatibility Layer
@@ -46,9 +60,9 @@ class RzpWhmcsCompat
     }
     
     /**
-     * Unified payment recording with fallbacks
+     * Unified payment recording with fallbacks and fee credit control
      */
-    public static function addPayment($invoiceId, $transId, $amount, $fees = 0, $gateway = 'razorpay', $date = null)
+    public static function addPayment($invoiceId, $transId, $amount, $fees = 0, $gateway = 'razorpay', $date = null, $feeCreditBehavior = 'disabled')
     {
         // Try modern localAPI first (WHMCS 7+)
         if (function_exists('localAPI')) {
@@ -62,6 +76,10 @@ class RzpWhmcsCompat
             ));
             
             if ($result['result'] === 'success') {
+                // Handle fee credit behavior
+                if ($feeCreditBehavior === 'enabled' && $fees > 0) {
+                    self::addFeeAsCredit($invoiceId, $fees, $transId);
+                }
                 return true;
             }
         }
@@ -69,10 +87,45 @@ class RzpWhmcsCompat
         // Fallback to legacy addInvoicePayment (WHMCS 6)
         if (function_exists('addInvoicePayment')) {
             addInvoicePayment($invoiceId, $transId, $amount, $fees, $gateway);
+            
+            // Handle fee credit behavior for legacy method
+            if ($feeCreditBehavior === 'enabled' && $fees > 0) {
+                self::addFeeAsCredit($invoiceId, $fees, $transId);
+            }
+            
             return true;
         }
         
         return false;
+    }
+    
+    /**
+     * Add gateway fee as credit balance to client account
+     */
+    private static function addFeeAsCredit($invoiceId, $fees, $transId)
+    {
+        try {
+            // Get invoice details to find client ID
+            $invoiceData = localAPI('GetInvoice', array('invoiceid' => $invoiceId));
+            if ($invoiceData['result'] === 'success' && isset($invoiceData['userid'])) {
+                $clientId = $invoiceData['userid'];
+                
+                // Add credit to client account
+                $creditResult = localAPI('AddCredit', array(
+                    'clientid' => $clientId,
+                    'amount' => $fees,
+                    'description' => 'Gateway fee credit - Transaction: ' . $transId
+                ));
+                
+                if ($creditResult['result'] === 'success') {
+                    logActivity('Razorpay Gateway Fee Credit Added: $' . $fees . ' to Client ID: ' . $clientId . ' for Transaction: ' . $transId);
+                } else {
+                    logActivity('Razorpay Gateway Fee Credit Failed: ' . ($creditResult['message'] ?? 'Unknown error') . ' for Transaction: ' . $transId);
+                }
+            }
+        } catch (Exception $e) {
+            logActivity('Razorpay Gateway Fee Credit Error: ' . $e->getMessage() . ' for Transaction: ' . $transId);
+        }
     }
     
     /**
@@ -215,6 +268,15 @@ $gatewayParams = getGatewayVariables($gatewayModuleName);
 if (!$gatewayParams['type'])
 {
     die("Module Not Activated");
+}
+
+// Security: Validate referer to prevent CSRF attacks
+$referer = $_SERVER['HTTP_REFERER'] ?? '';
+$expectedReferer = $gatewayParams['systemurl'] ?? '';
+if (!empty($referer) && !empty($expectedReferer) && strpos($referer, $expectedReferer) !== 0) {
+    logActivity('Razorpay Callback Security: Invalid referer - ' . $referer);
+    http_response_code(403);
+    die('Forbidden');
 }
 
 // Retrieve data returned in payment gateway callback
@@ -447,31 +509,70 @@ try
     // Convert Razorpay Unix timestamp to WHMCS datetime format using timezone conversion
     $paymentDate = RzpWhmcsCompat::tzConvertFromUnix($razorpayCreatedAt);
     
-    // Calculate gateway fee if payment amount differs from invoice amount
+    // Calculate gateway fee based on fee mode and credit behavior settings
     $actualPaymentAmount = $paymentDetails['amount'] / 100;
     $gatewayFee = 0;
     $paymentAmount = $amount;
+    $feeMode = $gatewayParams['feeMode'] ?? 'merchant_absorbs';
+    $feeCreditBehavior = $gatewayParams['feeCreditBehavior'] ?? 'disabled';
+    
+    logRazorpayDebug('Fee calculation started', [
+        'actual_payment_amount' => $actualPaymentAmount,
+        'invoice_amount' => $amount,
+        'fee_mode' => $feeMode,
+        'fee_credit_behavior' => $feeCreditBehavior
+    ]);
     
     if ($actualPaymentAmount > $amount) {
         $gatewayFee = $actualPaymentAmount - $amount;
-        // For merchant-absorbs mode: record invoice amount, fee as separate field
-        $paymentAmount = $amount;
+        
+        if ($feeMode === 'merchant_absorbs') {
+            // Merchant absorbs fee: record invoice amount, fee as separate field
+            $paymentAmount = $amount;
+            logRazorpayDebug('Merchant absorbs fee mode', [
+                'payment_amount' => $paymentAmount,
+                'gateway_fee' => $gatewayFee
+            ]);
+        } else {
+            // Client pays fee: record full payment amount
+            $paymentAmount = $actualPaymentAmount;
+            $gatewayFee = 0; // Don't record as separate fee since client paid it
+            logRazorpayDebug('Client pays fee mode', [
+                'payment_amount' => $paymentAmount,
+                'gateway_fee' => $gatewayFee
+            ]);
+        }
     } elseif ($actualPaymentAmount > $amount * 0.995) {
-        // For client-pays mode: record full payment amount
+        // Small difference, likely client pays mode
         $paymentAmount = $actualPaymentAmount;
+        $gatewayFee = 0;
+        logRazorpayDebug('Client pays mode detected', [
+            'payment_amount' => $paymentAmount,
+            'gateway_fee' => $gatewayFee
+        ]);
+    }
+    
+    // Apply fee credit behavior setting
+    if ($feeCreditBehavior === 'disabled' && $gatewayFee > 0) {
+        logRazorpayDebug('Fee credit disabled - fee will not be added as credit', [
+            'gateway_fee' => $gatewayFee,
+            'fee_credit_behavior' => $feeCreditBehavior
+        ]);
+        // Fee is recorded in transaction but not added as credit balance
     }
     
     verifySignature($merchant_order_id, $_POST, $gatewayParams);
 
     # Successful
-    # Apply Payment to Invoice using compatibility layer with proper date
+    # Apply Payment to Invoice using compatibility layer with proper date and fee credit control
     $success = RzpWhmcsCompat::addPayment(
         $merchant_order_id, 
         $razorpay_payment_id, 
         $paymentAmount, 
         $gatewayFee, 
         'razorpay', 
-        $paymentDate
+        $paymentDate,
+        $feeCreditBehavior
     );
 
     logTransaction($gatewayParams["name"], $_POST, "Successful"); # Save to Gateway Log: name, data array, status
