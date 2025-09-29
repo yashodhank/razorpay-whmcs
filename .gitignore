@@ -1,0 +1,67 @@
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+log/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Cache and compiled files
+cache/
+tmp/
+temp/
+*.cache
+
+# Environment and configuration files
+.env
+.env.local
+.env.production
+config.local.php
+config.local.ini
+
+# Composer
+vendor/
+composer.lock
+
+# Node.js (if any frontend assets)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Test files
+test-results/
+coverage/
+
+# WHMCS specific
+includes/configuration.php
+includes/configuration.local.php
+
+# Razorpay specific
+*.key
+*.pem
+private/

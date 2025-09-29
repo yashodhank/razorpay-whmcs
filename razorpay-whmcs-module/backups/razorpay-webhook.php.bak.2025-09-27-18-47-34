@@ -1,178 +1,10 @@
 <?php
 
-/**
- * WHMCS Razorpay Compatibility Layer
- * PHP 5.6+ safe with WHMCS 6/7/8 support
- */
-if (!class_exists('RzpWhmcsCompat')) {
-class RzpWhmcsCompat
-{
-    private static $whmcsVersion = null;
-    private static $phpVersion = null;
-    
-    /**
-     * Detect WHMCS capabilities via feature detection
-     */
-    public static function hasMetaDataFn()
-    {
-        return function_exists('razorpay_MetaData');
-    }
-    
-    /**
-     * Check if NoLocalCreditCardInput is supported
-     */
-    public static function supportsNoLocalCC()
-    {
-        return self::hasMetaDataFn();
-    }
-    
-    /**
-     * Unified payment recording with fallbacks
-     */
-    public static function addPayment($invoiceId, $transId, $amount, $fees = 0, $gateway = 'razorpay', $date = null)
-    {
-        // Try modern localAPI first (WHMCS 7+)
-        if (function_exists('localAPI')) {
-            $result = localAPI('AddInvoicePayment', array(
-                'invoiceid' => $invoiceId,
-                'transid' => $transId,
-                'gateway' => $gateway,
-                'amount' => $amount,
-                'fees' => $fees,
-                'date' => $date ?: date('Y-m-d H:i:s')
-            ));
-            
-            if ($result['result'] === 'success') {
-                return true;
-            }
-        }
-        
-        // Fallback to legacy addInvoicePayment (WHMCS 6)
-        if (function_exists('addInvoicePayment')) {
-            addInvoicePayment($invoiceId, $transId, $amount, $fees, $gateway);
-            return true;
-        }
-        
-        return false;
-    }
-    
-    /**
-     * Constant-time string comparison
-     */
-    public static function constantTimeEquals($a, $b)
-    {
-        if (function_exists('hash_equals')) {
-            return hash_equals($a, $b);
-        }
-        
-        // PHP 5.6 polyfill
-        if (strlen($a) !== strlen($b)) {
-            return false;
-        }
-        
-        $result = 0;
-        for ($i = 0; $i < strlen($a); $i++) {
-            $result |= ord($a[$i]) ^ ord($b[$i]);
-        }
-        
-        return $result === 0;
-    }
-    
-    /**
-     * Convert Razorpay Unix timestamp to WHMCS datetime using WHMCS timezone
-     */
-    public static function tzConvertFromUnix($timestamp)
-    {
-        // Get WHMCS timezone setting
-        $whmcsTimezone = 'Asia/Calcutta'; // Default fallback
-        if (class_exists('Illuminate\Database\Capsule\Manager')) {
-            try {
-                $result = self::safeQuery('tblconfiguration', 'value', array('setting' => 'cronTimeZone'));
-                if ($result && !empty($result->value)) {
-                    $whmcsTimezone = $result->value;
-                }
-            } catch (Exception $e) {
-                // Fallback to default if database query fails
-            }
-        }
-        
-        // Create DateTime object with WHMCS timezone
-        $dateTime = new DateTime();
-        $dateTime->setTimestamp($timestamp);
-        $dateTime->setTimezone(new DateTimeZone($whmcsTimezone));
-        
-        return $dateTime->format('Y-m-d H:i:s');
-    }
-    
-    /**
-     * Safe query method with fallbacks
-     */
-    public static function safeQuery($table, $fields, $where)
-    {
-        // Try Capsule first (WHMCS 6+)
-        if (class_exists('Illuminate\Database\Capsule\Manager')) {
-            $query = \Illuminate\Database\Capsule\Manager::table($table)->select($fields);
-            foreach ($where as $key => $value) {
-                $query->where($key, $value);
-            }
-            return $query->first();
-        }
-        
-        // Fallback to legacy select_query
-        if (function_exists('select_query')) {
-            $result = select_query($table, $fields, $where);
-            if (function_exists('mysql_fetch_assoc')) {
-                return mysql_fetch_assoc($result);
-            }
-        }
-        
-        return false;
-    }
-}
-}
-
-// Polyfills for PHP 5.6
-if (!function_exists('hash_equals')) {
-    function hash_equals($a, $b)
-    {
-        if (strlen($a) !== strlen($b)) {
-            return false;
-        }
-        
-        $result = 0;
-        for ($i = 0; $i < strlen($a); $i++) {
-            $result |= ord($a[$i]) ^ ord($b[$i]);
-        }
-        
-        return $result === 0;
-    }
-}
-
-if (!function_exists('random_bytes')) {
-    function random_bytes($length)
-    {
-        if (function_exists('openssl_random_pseudo_bytes')) {
-            $bytes = openssl_random_pseudo_bytes($length, $strong);
-            if ($strong === true) {
-                return $bytes;
-            }
-        }
-        
-        // Fallback to mt_rand (less secure but functional)
-        $bytes = '';
-        for ($i = 0; $i < $length; $i++) {
-            $bytes .= chr(mt_rand(0, 255));
-        }
-        
-        return $bytes;
-    }
-}
-
 // Require libraries needed for gateway module functions.
 require_once __DIR__ . '/../../../init.php';
 require_once __DIR__ . '/../../../includes/gatewayfunctions.php';
 require_once __DIR__ . '/../../../includes/invoicefunctions.php';
-require_once __DIR__ . '/lib/razorpay-sdk/Razorpay.php';
+require_once __DIR__ . '/razorpay-sdk/Razorpay.php';
 
 use Razorpay\Api\Api;
 use Razorpay\Api\Errors;
@@ -246,11 +78,9 @@ if ($enabled === 'on' and
 
         try
         {
-            $expectedSignature = hash_hmac('sha256', $post, $razorpayWebhookSecret);
-            $actualSignature = $_SERVER['HTTP_X_RAZORPAY_SIGNATURE'];
-            if (!RzpWhmcsCompat::constantTimeEquals($expectedSignature, $actualSignature)) {
-                throw new Errors\SignatureVerificationError('Invalid signature');
-            }
+            $api->utility->verifyWebhookSignature($post,
+                                                        $_SERVER['HTTP_X_RAZORPAY_SIGNATURE'],
+                                                        $razorpayWebhookSecret);
         }
         catch (Errors\SignatureVerificationError $e)
         {
@@ -384,11 +214,11 @@ function orderPaid(array $data, $gatewayParams)
         $orderAmount=$order['orders']['order'][0]['amount'];
         
         // Handle gateway fees based on configuration
-        $feeMode = $gatewayParams['feeMode'] ?? 'merchant_absorbs';
+        $handleGatewayFees = $gatewayParams['handleGatewayFees'] ?? true;
         $paymentAmount = $orderAmount;
         $gatewayFee = 0;
         
-        if ($feeMode === 'merchant_absorbs' || $feeMode === 'client_pays') {
+        if ($handleGatewayFees) {
             // Get the actual payment amount from Razorpay to check for gateway fees
             try {
                 $api = new \Razorpay\Api\Api($gatewayParams['keyId'], $gatewayParams['keySecret']);
@@ -408,17 +238,21 @@ function orderPaid(array $data, $gatewayParams)
         }
         
         // Convert Razorpay Unix timestamp to WHMCS datetime format (IST timezone)
-        $paymentDate = RzpWhmcsCompat::tzConvertFromUnix($razorpayCreatedAt);
+        $paymentDate = date('Y-m-d H:i:s', $razorpayCreatedAt);
         
-        // Use compatibility layer for payment recording
-        $success = RzpWhmcsCompat::addPayment(
-            $orderId,
-            $razorpayPaymentId,
-            $paymentAmount,
-            $gatewayFee,
-            'razorpay',
-            $paymentDate
-        );
+        // Use WHMCS Local API to control transaction date
+        $addPaymentResult = localAPI('AddInvoicePayment', [
+            'invoiceid' => $orderId,
+            'transid' => $razorpayPaymentId,
+            'gateway' => 'razorpay',
+            'amount' => $paymentAmount,
+            'fees' => $gatewayFee,
+            'date' => $paymentDate
+        ]);
+        
+        if ($addPaymentResult['result'] !== 'success') {
+            logTransaction($gatewayParams["name"], "Failed to add payment: " . $addPaymentResult['message'], "Payment Add Error");
+        }
         
         logTransaction($gatewayParams["name"], $log, "Successful"); # Save to Gateway Log: name, data array, status
     }

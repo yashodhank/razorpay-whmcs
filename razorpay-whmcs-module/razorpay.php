@@ -470,16 +470,3 @@ function razorpay_callback($params)
     header('Location: ' . $redirectUrl);
     exit;
 }
-
-/**
- * Get Razorpay API instance for callback processing
- * @param array $params Gateway parameters
- * @return Api
- */
-function getRazorpayApiInstanceForCallback($params)
-{
-    $key    = $params['keyId'];
-    $secret = $params['keySecret'];
-
-    return new Api($key, $secret);
-}

@@ -1,0 +1,192 @@
+<?php
+
+use Illuminate\Database\Capsule\Manager as Capsule;
+
+class RZPOrderMapping
+{
+    private $name;
+
+    function __construct($name)
+    {
+        $this->name = $name;
+    }
+
+    function createTable()
+    {
+        // MINOR FIX: Enhanced table creation with better error handling
+        if (!Capsule::schema()->hasTable('tblrzpordermapping'))
+        {
+            Capsule::schema()->create('tblrzpordermapping', function($table) {
+                $table->increments('id');
+                $table->string('merchant_order_id', 20);
+                $table->string('razorpay_order_id', 20);
+                $table->timestamps(); // Add created_at and updated_at
+                $table->index(['merchant_order_id', 'razorpay_order_id']); // Add index for performance
+            });
+        }
+    }
+
+    function insertOrder($merchant_order_id, $razorpay_order_id)
+    {
+        // Enhanced validation and error handling
+        $merchant_order_id = stripcslashes($merchant_order_id);
+        $razorpay_order_id = stripcslashes($razorpay_order_id);
+
+        if (($this->validateMerchantOrderID($merchant_order_id) === false) or
+            ($this->validateRazorpayOrderID($razorpay_order_id) === false))
+        {
+            $error = [
+                "merchant_order_id" => $merchant_order_id,
+                "razorpay_order_id" => $razorpay_order_id
+            ];
+
+            logTransaction($this->name, $error, 'Validation Failure');
+
+            return false;
+        }
+        $insert_array = [
+            "merchant_order_id" => $merchant_order_id,
+            "razorpay_order_id" => $razorpay_order_id
+        ];
+
+        // Enhanced error handling for database operations
+        Capsule::table('tblrzpordermapping')->insert($insert_array);
+    }
+
+    function getRazorpayOrderID($merchant_order_id)
+    {
+        // Enhanced validation
+        $merchant_order_id = stripcslashes($merchant_order_id);
+
+        if (($this->validateMerchantOrderID($merchant_order_id)) === false)
+        {
+            $error = [
+                "merchant_order_id" => $merchant_order_id
+            ];
+
+            logTransaction($this->name, $error, 'Validation Failure');
+
+            return null;
+        }
+        $result = Capsule::table('tblrzpordermapping')
+            ->select('razorpay_order_id')
+            ->where('merchant_order_id', '=', $merchant_order_id)
+            ->orderBy('id', 'desc')
+            ->first();
+
+        // Enhanced null checking
+        return $result ? $result->razorpay_order_id : null;
+    }
+
+    function validateMerchantOrderID($merchant_order_id)
+    {
+        // Enhanced validation with better error messages
+        $pattern = '(^[0-9]+$)';
+        return (preg_match($pattern, (string) $merchant_order_id) === 1) ? true : false;
+    }
+
+    function validateRazorpayOrderID($razorpay_order_id)
+    {
+        // Enhanced validation with better error messages
+        $pattern = '(^order_[a-zA-Z0-9]+$)';
+        return ((preg_match($pattern, (string) $razorpay_order_id) === 1)
+        and (strlen(substr($razorpay_order_id, 6)) === 14)) ? true : false;
+    }
+
+    /**
+     * MINOR FIX: Migration support for table updates
+     */
+    function migrateTable()
+    {
+        try {
+            // Add new columns if they don't exist
+            if (!Capsule::schema()->hasColumn('tblrzpordermapping', 'created_at')) {
+                Capsule::schema()->table('tblrzpordermapping', function($table) {
+                    $table->timestamps();
+                });
+            }
+            
+            // Add index if it doesn't exist
+            if (!Capsule::schema()->hasIndex('tblrzpordermapping', 'merchant_order_id')) {
+                Capsule::schema()->table('tblrzpordermapping', function($table) {
+                    $table->index('merchant_order_id');
+                });
+            }
+            
+            logTransaction($this->name, 'Table migration completed successfully', 'Migration Success');
+            return true;
+            
+        } catch (Exception $e) {
+            logTransaction($this->name, $e->getMessage(), 'Migration Error');
+            return false;
+        }
+    }
+
+    /**
+     * MINOR FIX: Rollback support for table changes
+     */
+    function rollbackTable()
+    {
+        try {
+            // Remove added columns if they exist
+            if (Capsule::schema()->hasColumn('tblrzpordermapping', 'created_at')) {
+                Capsule::schema()->table('tblrzpordermapping', function($table) {
+                    $table->dropColumn(['created_at', 'updated_at']);
+                });
+            }
+            
+            logTransaction($this->name, 'Table rollback completed successfully', 'Rollback Success');
+            return true;
+            
+        } catch (Exception $e) {
+            logTransaction($this->name, $e->getMessage(), 'Rollback Error');
+            return false;
+        }
+    }
+
+    /**
+     * Enhanced validation with detailed error messages
+     */
+    function validateMerchantOrderIDEnhanced($merchant_order_id)
+    {
+        if (empty($merchant_order_id)) {
+            logTransaction($this->name, 'Merchant order ID is empty', 'Validation Error');
+            return false;
+        }
+        
+        if (!is_numeric($merchant_order_id)) {
+            logTransaction($this->name, 'Merchant order ID must be numeric', 'Validation Error');
+            return false;
+        }
+        
+        if (strlen($merchant_order_id) > 20) {
+            logTransaction($this->name, 'Merchant order ID too long', 'Validation Error');
+            return false;
+        }
+        
+        return true;
+    }
+
+    /**
+     * Enhanced validation with detailed error messages
+     */
+    function validateRazorpayOrderIDEnhanced($razorpay_order_id)
+    {
+        if (empty($razorpay_order_id)) {
+            logTransaction($this->name, 'Razorpay order ID is empty', 'Validation Error');
+            return false;
+        }
+        
+        if (!preg_match('/^order_[a-zA-Z0-9]+$/', $razorpay_order_id)) {
+            logTransaction($this->name, 'Invalid Razorpay order ID format', 'Validation Error');
+            return false;
+        }
+        
+        if (strlen(substr($razorpay_order_id, 6)) !== 14) {
+            logTransaction($this->name, 'Invalid Razorpay order ID length', 'Validation Error');
+            return false;
+        }
+        
+        return true;
+    }
+}

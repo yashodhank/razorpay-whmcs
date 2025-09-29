@@ -1,0 +1,33 @@
+{
+    "name": "razorpay/whmcs-gateway",
+    "description": "Razorpay payment gateway module for WHMCS",
+    "version": "2.2.1",
+    "type": "whmcs-gateway",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Razorpay WHMCS Gateway Team",
+            "email": "support@yourcompany.com"
+        }
+    ],
+    "require": {
+        "php": ">=5.6",
+        "whmcs/whmcs": ">=6.0"
+    },
+    "suggest": {
+        "razorpay/razorpay-php": "Official Razorpay PHP SDK"
+    },
+    "keywords": [
+        "whmcs",
+        "razorpay",
+        "payment-gateway",
+        "billing",
+        "ecommerce"
+    ],
+    "homepage": "https://github.com/yourusername/razorpay-whmcs-gateway",
+    "support": {
+        "email": "support@yourcompany.com",
+        "issues": "https://github.com/yourusername/razorpay-whmcs-gateway/issues",
+        "docs": "https://github.com/yourusername/razorpay-whmcs-gateway/wiki"
+    }
+}
